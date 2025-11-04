@@ -125,83 +125,94 @@ export class GeminiService {
         .filter(web => web && web.uri && web.title) as {uri: string, title: string}[];
 
     const parts: ChatPart[] = [];
-    const sections = fullResponseText.split(/\n\s*\n/);
-    let summary = sections.shift() || '';
+    
+    const drinkHeaderRegex = /_*\*_*\s*Gdje popiti\s*_*\*_*/i;
+    const buyHeaderRegex = /_*\*_*\s*Gdje kupiti\s*_*\*_*/i;
+    const disclaimerRegex = /Cijene su procjene/i;
+    
+    const drinkMatch = fullResponseText.match(drinkHeaderRegex);
+    const buyMatch = fullResponseText.match(buyHeaderRegex);
+    const disclaimerMatch = fullResponseText.match(disclaimerRegex);
 
-    // If summary contains one of the section headers, it means there was no separate summary.
-    if (summary.includes('**Gdje popiti**') || summary.includes('**Gdje kupiti**')) {
-        sections.unshift(summary);
-        summary = '';
-    }
-
+    // 1. Extract Summary
+    let summaryEndIndex = [drinkMatch?.index, buyMatch?.index, disclaimerMatch?.index]
+        .filter((i): i is number => i !== undefined)
+        .reduce((min, curr) => Math.min(min, curr), Infinity);
+    if (summaryEndIndex === Infinity) summaryEndIndex = fullResponseText.length;
+    
+    const summary = fullResponseText.substring(0, summaryEndIndex).trim();
     if (summary) {
         parts.push({ type: 'text', content: summary });
     }
 
-    const drinkSectionText = this._extractSection(fullResponseText, '**Gdje popiti**');
-    const buySectionText = this._extractSection(fullResponseText, '**Gdje kupiti**');
+    // 2. Extract "Gdje popiti" section
+    if (drinkMatch) {
+        const sectionStartIndex = drinkMatch.index! + drinkMatch[0].length;
+        
+        const nextSectionIndex = [buyMatch?.index, disclaimerMatch?.index]
+            .filter((i): i is number => i !== undefined && i > drinkMatch!.index!)
+            .reduce((min, curr) => Math.min(min, curr), Infinity);
 
-    if (drinkSectionText) {
+        const sectionEndIndex = nextSectionIndex === Infinity ? fullResponseText.length : nextSectionIndex;
+        
+        const drinkSectionText = fullResponseText.substring(sectionStartIndex, sectionEndIndex).trim();
         const places = this._parsePlaces(drinkSectionText, webUris);
         if (places.length > 0) {
             parts.push({ type: 'locations', title: 'Gdje popiti', places });
         }
     }
+    
+    // 3. Extract "Gdje kupiti" section
+    if (buyMatch) {
+        const sectionStartIndex = buyMatch.index! + buyMatch[0].length;
+        
+        const nextSectionIndex = [disclaimerMatch?.index]
+             .filter((i): i is number => i !== undefined && i > buyMatch!.index!)
+            .reduce((min, curr) => Math.min(min, curr), Infinity);
 
-    if (buySectionText) {
+        const sectionEndIndex = nextSectionIndex === Infinity ? fullResponseText.length : nextSectionIndex;
+        
+        const buySectionText = fullResponseText.substring(sectionStartIndex, sectionEndIndex).trim();
         const places = this._parsePlaces(buySectionText, webUris);
         if (places.length > 0) {
             parts.push({ type: 'locations', title: 'Gdje kupiti', places });
         }
     }
-    
-    // Add disclaimer if any locations were found
-    if (parts.some(p => p.type === 'locations')) {
-        const disclaimer = fullResponseText.match(/Cijene su procjene.*$/m);
-        if (disclaimer) {
-            parts.push({ type: 'text', content: disclaimer[0] });
+
+    // 4. Extract Disclaimer
+    if (disclaimerMatch) {
+        const disclaimerText = fullResponseText.substring(disclaimerMatch.index!).trim();
+        if (disclaimerText) {
+            parts.push({ type: 'text', content: disclaimerText });
         }
     }
-    
-    // If no structured parts were parsed, return the raw text
-    if (parts.length === 0 && fullResponseText) {
-        return [{type: 'text', content: fullResponseText}];
+
+    // Fallback if nothing was parsed
+    if (parts.length === 0 && fullResponseText.trim()) {
+        return [{ type: 'text', content: fullResponseText.trim() }];
     }
 
-    return parts;
-  }
-  
-  private _extractSection(text: string, header: string): string {
-    const startIndex = text.indexOf(header);
-    if (startIndex === -1) return '';
-
-    const nextHeader1 = text.indexOf('**Gdje', startIndex + header.length);
-    const nextHeader2 = text.indexOf('Cijene su procjene', startIndex + header.length);
-    let endIndex = -1;
-
-    if (nextHeader1 !== -1 && nextHeader2 !== -1) {
-        endIndex = Math.min(nextHeader1, nextHeader2);
-    } else if (nextHeader1 !== -1) {
-        endIndex = nextHeader1;
-    } else if (nextHeader2 !== -1) {
-        endIndex = nextHeader2;
-    }
-
-    return endIndex === -1 
-        ? text.substring(startIndex + header.length)
-        : text.substring(startIndex + header.length, endIndex);
+    return parts.filter(p => {
+        if (p.type === 'text' && !p.content) return false;
+        if (p.type === 'locations' && p.places.length === 0) return false;
+        return true;
+    });
   }
 
   private _parsePlaces(sectionText: string, uris?: {uri: string, title: string}[]): Place[] {
-    const placeBlocks = sectionText.trim().split(/\n\s*\d+\.\s*/).filter(Boolean);
+    // Split by one or more newlines, making it robust to different list formats.
+    const placeBlocks = sectionText.trim().split(/\n\s*\n+/).filter(Boolean);
     
     return placeBlocks.map(block => {
         const lines = block.trim().split('\n').map(l => l.trim());
         const place: Place = { name: 'N/A' };
         
         if (lines.length > 0) {
-            const firstLine = lines[0];
-            const nameMatch = firstLine.match(/^(.+?)\s*—/);
+            // Remove markdown list markers like "1." or "*" from the first line.
+            const firstLine = lines[0].replace(/^\d+\.\s*|^\*\s*/, '').trim();
+            
+            const nameMatch = firstLine.match(/^(.+?)\s*(—|-)/); // Accept em-dash or hyphen
+            // Clean bolding markers from name
             place.name = nameMatch ? nameMatch[1].trim().replace(/\*+/g, '') : firstLine.replace(/\*+/g, '');
             
             // Try to find a map link from grounding chunks
@@ -216,22 +227,22 @@ export class GeminiService {
                 }
             }
             
-            const ratingMatch = firstLine.match(/★(\d[\.,]\d)\s*\((\d+)\)/);
+            const ratingMatch = firstLine.match(/★(\d[\.,]\d)\s*\((\d+)/);
             if(ratingMatch) {
                 place.rating = ratingMatch[1];
                 place.reviews = ratingMatch[2];
             }
             
-            const distanceMatch = firstLine.match(/—\s*([\d\.,]+\s*k?m)$/);
+            const distanceMatch = firstLine.match(/(—|-)\s*([\d\.,]+\s*k?m)$/i); // Accept em-dash or hyphen, case-insensitive
             if (distanceMatch) {
-                place.distance = distanceMatch[1];
+                place.distance = distanceMatch[2];
             }
         }
         
         lines.slice(1).forEach(line => {
             if (line.toLowerCase().startsWith('adresa:')) {
-                const parts = line.split('—').map(p => p.trim());
-                place.address = parts[0].replace('Adresa:', '').trim();
+                const parts = line.split(/—|-/).map(p => p.trim()); // Accept em-dash or hyphen
+                place.address = parts[0].replace(/adresa:/i, '').trim();
                 if (parts.length > 1) {
                     place.hours = parts[1].replace(/radno vrijeme:/i, '').trim();
                 }
@@ -239,7 +250,7 @@ export class GeminiService {
                  place.hours = line.replace(/radno vrijeme:/i, '').trim();
             } else if (line.toLowerCase().startsWith('procjena cijene:')) {
                 place.price = line.replace(/procjena cijene:/i, '').trim();
-            } else if (line.startsWith('[Google Maps link]')) {
+            } else if (line.includes('[Google Maps link]')) {
                  if (!place.mapLink) place.mapLink = '#';
             } else if (line) {
                 place.quote = (place.quote ? place.quote + ' ' : '') + line.replace(/^\*+|\*+$/g, '');
@@ -251,6 +262,6 @@ export class GeminiService {
         }
 
         return place;
-    });
+    }).filter(p => p.name !== 'N/A' && p.name.trim() !== '');
   }
 }

@@ -15,12 +15,13 @@ export class ChatComponent {
   @ViewChild('chatContainer') private chatContainer!: ElementRef;
 
   private geminiService = inject(GeminiService);
+  private nextId = 0;
   
   userInput = signal('');
   userImage = signal<UserImagePart | undefined>(undefined);
   messages = signal<ChatMessage[]>([
     {
-      id: Date.now(),
+      id: this.nextId++,
       role: 'model',
       parts: [{ type: 'text', content: 'Pozdrav! Upišite ime pića ili pošaljite sliku. Za preciznije rezultate, podijelite svoju lokaciju klikom na ikonu 📍.' }]
     }
@@ -58,13 +59,13 @@ export class ChatComponent {
     const userParts: ChatPart[] = [];
     if (textInput) userParts.push({ type: 'text', content: textInput });
     if (image) userParts.push(image);
-    this.messages.update(m => [...m, { id: Date.now(), role: 'user', parts: userParts }]);
+    this.messages.update(m => [...m, { id: this.nextId++, role: 'user', parts: userParts }]);
     
     this.userInput.set('');
     this.userImage.set(undefined);
     this.isLoading.set(true);
 
-    const modelMessageId = Date.now();
+    const modelMessageId = this.nextId++;
     this.messages.update(m => [...m, { id: modelMessageId, role: 'model', parts: [] }]);
 
     try {
@@ -160,7 +161,7 @@ export class ChatComponent {
             longitude: position.coords.longitude,
           });
           const locationMessage: ChatMessage = {
-            id: Date.now(),
+            id: this.nextId++,
             role: 'model',
             parts: [{ type: 'text', content: '✅ Lokacija spremljena! Pretraga će sada biti preciznija.' }]
           };
@@ -180,7 +181,7 @@ export class ChatComponent {
               break;
           }
            const errorChatMessage: ChatMessage = {
-            id: Date.now(),
+            id: this.nextId++,
             role: 'model',
             parts: [{ type: 'error', message: errorMessage }]
           };
@@ -189,7 +190,7 @@ export class ChatComponent {
       );
     } else {
        const errorChatMessage: ChatMessage = {
-        id: Date.now(),
+        id: this.nextId++,
         role: 'model',
         parts: [{ type: 'error', message: 'Geolokacija nije podržana u ovom pregledniku.' }]
       };
