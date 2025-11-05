@@ -1,6 +1,7 @@
 import { ChangeDetectionStrategy, Component, ElementRef, ViewChild, computed, effect, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { DomSanitizer, SafeHtml } from '@angular/platform-browser'; // Removed SafeResourceUrl
 import { GeminiService } from '../../services/gemini.service';
 import { ChatMessage, ChatPart, Place, UserImagePart } from '../../models/app.models';
 
@@ -17,6 +18,7 @@ export class ChatComponent {
   @ViewChild('chatContainer') private chatContainer!: ElementRef;
 
   private geminiService = inject(GeminiService);
+  private sanitizer = inject(DomSanitizer);
   private nextId = 0;
   
   private readonly initialMessages: ChatMessage[] = [
@@ -34,6 +36,7 @@ export class ChatComponent {
   userLocation = signal<{latitude: number, longitude: number} | null>(null);
   copiedPlaceName = signal<string | null>(null);
   quickSuggestions = ['Pivo', 'Vino', 'Koktel', 'Kava'];
+  copiedMessageId = signal<number | null>(null); // New signal for copied message feedback
 
   isModelStreaming = computed(() => {
     if (!this.isLoading()) return false;
@@ -47,6 +50,66 @@ export class ChatComponent {
         this.scrollToBottom();
       }
     });
+  }
+
+  // Helper to validate if a string is a valid HTTP/HTTPS URL
+  isValidHttpUrl(s: string): boolean {
+    try {
+      const url = new URL(s);
+      return url.protocol === "http:" || url.protocol === "https:";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  linkify(text: string): SafeHtml {
+    // Regex to find URLs: looks for http/https/ftp protocols or www. prefix.
+    const urlRegex = /(\b(https?|ftp|file):\/\/[-A-Z0-9+&@#\/%?=~_|!:,.;]*[-A-Z0-9+&@#\/%=~_|])|(\bwww\.[-A-Z0-9+&@#\/%?=~_|!:,.;]*[-A-Z0-9+&@#\/%=~_|])/ig;
+    
+    let result = '';
+    let lastIndex = 0;
+    let match;
+
+    while ((match = urlRegex.exec(text)) !== null) {
+      // Append escaped text before the match
+      result += this.escapeHtml(text.substring(lastIndex, match.index));
+      
+      const url = match[0];
+      const properUrl = url.startsWith('http') ? url : `https://${url}`;
+      
+      // Only create a link if the URL is valid
+      if (this.isValidHttpUrl(properUrl)) {
+        const linkHtml = `
+          <a href="${properUrl}" 
+             target="_blank" 
+             rel="noopener noreferrer" 
+             class="text-sky-400 hover:underline transition-colors">
+            ${this.escapeHtml(properUrl)}
+          </a>
+        `;
+        result += linkHtml.replace(/\s\s+/g, ' ').trim();
+      } else {
+        // If not a valid URL (e.g., malformed), just display the raw (escaped) text
+        result += this.escapeHtml(url);
+      }
+      lastIndex = match.index + url.length;
+    }
+    
+    // Append the rest of the escaped text after the last match
+    if (lastIndex < text.length) {
+      result += this.escapeHtml(text.substring(lastIndex));
+    }
+
+    return this.sanitizer.bypassSecurityTrustHtml(result);
+  }
+
+  private escapeHtml(text: string): string {
+    return text
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
   }
 
   resetChat(): void {
@@ -231,14 +294,16 @@ export class ChatComponent {
   }
 
   async sharePlace(place: Place): Promise<void> {
-    const shareText = `Evo preporuke za piće: ${place.name}\nAdresa: ${place.address || 'Nije dostupna'}\n${place.mapLink ? 'Karta: ' + place.mapLink : ''}`;
+    const shareText = `Evo preporuke za piće: ${place.name}\nAdresa: ${place.address || 'Nije dostupna'}`;
     
+    let urlToShare = window.location.href; // Default to current app URL
+
     if (navigator.share) {
       try {
         await navigator.share({
           title: `Preporuka: ${place.name}`,
           text: shareText,
-          url: place.mapLink || window.location.href
+          url: urlToShare
         });
       } catch (error) {
         console.error('Greška pri dijeljenju:', error);
@@ -253,6 +318,56 @@ export class ChatComponent {
       }
     }
   }
+
+  async copyMessageContent(messageId: number): Promise<void> {
+    const messageToCopy = this.messages().find(msg => msg.id === messageId);
+    if (!messageToCopy) return;
+
+    let contentToCopy = '';
+    for (const part of messageToCopy.parts) {
+      switch (part.type) {
+        case 'text':
+          contentToCopy += part.content + '\n\n';
+          break;
+        case 'locations':
+          contentToCopy += `${part.title}:\n`;
+          for (const place of part.places) {
+            contentToCopy += `- ${place.name}`;
+            if (place.rating) contentToCopy += ` Ocjena: ${place.rating} (${place.reviews} recenzija)`;
+            if (place.distance) contentToCopy += ` Udaljenost: ${place.distance}`;
+            contentToCopy += '\n';
+            if (place.address) contentToCopy += `  Adresa: ${place.address}\n`;
+            if (place.hours) contentToCopy += `  Radno vrijeme: ${place.hours}\n`;
+            if (place.price) contentToCopy += `  Procjena cijene: ${place.price}\n`;
+            if (place.quote) contentToCopy += `  "${place.quote}"\n`;
+            contentToCopy += '\n';
+          }
+          break;
+        case 'sources':
+          contentToCopy += `Izvori:\n`;
+          for (const source of part.sources) {
+            contentToCopy += `- ${source.title || source.uri}: ${source.uri}\n`;
+          }
+          contentToCopy += '\n';
+          break;
+        case 'error':
+          contentToCopy += `GREŠKA: ${part.message}\n\n`;
+          break;
+        // user-image parts are for user messages, not typically copied from model.
+      }
+    }
+
+    if (contentToCopy.trim()) {
+      try {
+        await navigator.clipboard.writeText(contentToCopy.trim());
+        this.copiedMessageId.set(messageId);
+        setTimeout(() => this.copiedMessageId.set(null), 2000);
+      } catch (err) {
+        console.error('Nije uspjelo kopiranje:', err);
+      }
+    }
+  }
+
 
   togglePlaceDetails(placeToToggle: Place): void {
     this.messages.update(currentMessages => 

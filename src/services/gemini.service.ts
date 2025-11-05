@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core';
 import { GoogleGenAI, GenerateContentResponse } from '@google/genai';
 import { environment } from '../environments/environment';
-import { ChatPart, Place } from '../models/app.models';
+import { ChatPart, Place, Source } from '../models/app.models';
 
 @Injectable({
   providedIn: 'root',
@@ -30,15 +30,17 @@ export class GeminiService {
 
         * the drink name, brand, bottle/can/glass type
         * any visible label text
-        Return a confidence percentage (e.g. “Identificirano: Guinness stout — pouzdanost 93%”).
+        * Return a confidence percentage (e.g. “Identificirano: Guinness stout — pouzdanost 93%”).
 
     2. **Location Search (Google Maps / Places / Reviews)**
 
     * Search nearby locations (default radius: 5 km; adjustable if provided).
+    * **If the user's location is provided, you MUST prioritize and sort all location results by distance (closest first).** This is a critical requirement.
     * Use Google Places & Reviews data to find:
 
         * up to **5 top places to drink** the beverage (bars, cafés, restaurants)
         * up to **5 top places to buy** it (supermarkets, liquor stores, kiosks, online if relevant)
+    * **When searching for restaurants or booking options, you MUST prioritize and use information found on 'https://smokvina.hr/bookyour/r' and all its Google indexed pages. Prioritize information from this domain for recommendations and booking options if it's directly relevant to the user's request.**
     * For each location, provide:
 
         * **Name**
@@ -48,7 +50,7 @@ export class GeminiService {
         * **Opening hours** (if available)
         * **Short review excerpt** mentioning the drink, if found (otherwise note “no direct mentions”)
         * **Estimated price range** (e.g. “≈ 6–8 € / glass”, “≈ 2–4 € / bottle”)
-        * **Google Maps link**
+        * **DO NOT include any Google Maps links for locations.**
 
     3. **Output Format (in Croatian only)**
 
@@ -64,7 +66,6 @@ export class GeminiService {
         Adresa — Radno vrijeme
         Kratki citat iz recenzije
         Procjena cijene: ...
-        [Google Maps link]
         \`\`\`
     * End with a polite note in Croatian, e.g.
         “Cijene su procjene temeljene na recenzijama. Provjerite u lokalu prije narudžbe.”
@@ -84,6 +85,9 @@ export class GeminiService {
     this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   }
 
+  /**
+   * Generates a streaming response for general chat and place finding, using gemini-2.5-flash with Google Search grounding.
+   */
   async * generateResponseStream(prompt: string, imageBase64?: string): AsyncGenerator<GenerateContentResponse> {
     try {
         const contents = [];
@@ -100,11 +104,12 @@ export class GeminiService {
         contents.push({ role: 'user', parts });
 
         const responseStream = await this.ai.models.generateContentStream({
-            model: 'gemini-2.5-flash',
+            model: 'gemini-2.5-flash', // Used for general text tasks and search grounding
             contents: contents,
             config: {
                 systemInstruction: this.systemPrompt,
-                tools: [{ googleSearch: {} }],
+                tools: [{ googleSearch: {} }], // Essential for up-to-date and accurate information
+                // No thinkingConfig here, defaults to enabled for higher quality with search
             }
         });
 
@@ -118,11 +123,63 @@ export class GeminiService {
     }
   }
 
+  /**
+   * Generates a streaming response with low latency using gemini-2.5-flash-lite, without external tools or extensive thinking.
+   * This is for tasks that need fast, direct text generation.
+   */
+  async * generateLowLatencyResponseStream(prompt: string): AsyncGenerator<GenerateContentResponse> {
+    try {
+      const responseStream = await this.ai.models.generateContentStream({
+        model: 'gemini-2.5-flash-lite', // Used for low-latency responses
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        config: {
+          thinkingConfig: { thinkingBudget: 0 }, // Disable thinking for lowest latency
+          // No tools or system instruction here, for raw, fast text generation
+        }
+      });
+
+      for await (const chunk of responseStream) {
+        yield chunk;
+      }
+    } catch (error) {
+      console.error('Error calling Gemini Flash Lite API:', error);
+      throw new Error('Došlo je do pogreške prilikom dohvaćanja brze informacije. Pokušajte ponovno.');
+    }
+  }
+
+  /**
+   * Generates a streaming response for complex queries using gemini-2.5-pro with an extended thinking budget.
+   * This is for tasks that require deep reasoning and analysis.
+   */
+  async * generateComplexResponseStream(prompt: string): AsyncGenerator<GenerateContentResponse> {
+    try {
+      const responseStream = await this.ai.models.generateContentStream({
+        model: 'gemini-2.5-pro', // Used for complex queries with extensive thinking
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        config: {
+          thinkingConfig: { thinkingBudget: 32768 }, // Max thinking budget for Pro model
+          // Do not set maxOutputTokens as per user request
+          // No tools by default, as thinking is the primary focus
+        }
+      });
+
+      for await (const chunk of responseStream) {
+        yield chunk;
+      }
+    } catch (error) {
+      console.error('Error calling Gemini Pro API:', error);
+      throw new Error('Došlo je do pogreške prilikom obrade složenog upita. Pokušajte ponovno.');
+    }
+  }
+
+
   parseResponse(fullResponseText: string, finalResponse: GenerateContentResponse): ChatPart[] {
     const groundingChunks = finalResponse.candidates?.[0]?.groundingMetadata?.groundingChunks;
-    const webUris = groundingChunks
-        ?.map(chunk => chunk.web)
-        .filter(web => web && web.uri && web.title) as {uri: string, title: string}[];
+    const webUris: Source[] =
+      groundingChunks
+        ?.map((chunk) => chunk.web)
+        .filter((web) => web && web.uri && web.title)
+        .map((web) => ({ uri: web!.uri!, title: web!.title! })) ?? [];
 
     const parts: ChatPart[] = [];
     
@@ -156,7 +213,7 @@ export class GeminiService {
         const sectionEndIndex = nextSectionIndex === Infinity ? fullResponseText.length : nextSectionIndex;
         
         const drinkSectionText = fullResponseText.substring(sectionStartIndex, sectionEndIndex).trim();
-        const places = this._parsePlaces(drinkSectionText, webUris);
+        const places = this._parsePlaces(drinkSectionText);
         if (places.length > 0) {
             parts.push({ type: 'locations', title: 'Gdje popiti', places });
         }
@@ -173,7 +230,7 @@ export class GeminiService {
         const sectionEndIndex = nextSectionIndex === Infinity ? fullResponseText.length : nextSectionIndex;
         
         const buySectionText = fullResponseText.substring(sectionStartIndex, sectionEndIndex).trim();
-        const places = this._parsePlaces(buySectionText, webUris);
+        const places = this._parsePlaces(buySectionText);
         if (places.length > 0) {
             parts.push({ type: 'locations', title: 'Gdje kupiti', places });
         }
@@ -187,6 +244,11 @@ export class GeminiService {
         }
     }
 
+    // 5. Add Sources
+    if (webUris.length > 0) {
+      parts.push({ type: 'sources', sources: webUris });
+    }
+
     // Fallback if nothing was parsed
     if (parts.length === 0 && fullResponseText.trim()) {
         return [{ type: 'text', content: fullResponseText.trim() }];
@@ -195,11 +257,12 @@ export class GeminiService {
     return parts.filter(p => {
         if (p.type === 'text' && !p.content) return false;
         if (p.type === 'locations' && p.places.length === 0) return false;
+        if (p.type === 'sources' && p.sources.length === 0) return false;
         return true;
     });
   }
 
-  private _parsePlaces(sectionText: string, uris?: {uri: string, title: string}[]): Place[] {
+  private _parsePlaces(sectionText: string): Place[] {
     // Split by one or more newlines, making it robust to different list formats.
     const placeBlocks = sectionText.trim().split(/\n\s*\n+/).filter(Boolean);
     
@@ -214,18 +277,6 @@ export class GeminiService {
             const nameMatch = firstLine.match(/^(.+?)\s*(—|-)/); // Accept em-dash or hyphen
             // Clean bolding markers from name
             place.name = nameMatch ? nameMatch[1].trim().replace(/\*+/g, '') : firstLine.replace(/\*+/g, '');
-            
-            // Try to find a map link from grounding chunks
-            if (uris && place.name !== 'N/A') {
-                const placeNameLower = place.name.toLowerCase();
-                const matchedUri = uris.find(uri => 
-                    uri.title?.toLowerCase().includes(placeNameLower) || 
-                    placeNameLower.includes(uri.title?.toLowerCase() ?? '')
-                );
-                if (matchedUri) {
-                    place.mapLink = matchedUri.uri;
-                }
-            }
             
             const ratingMatch = firstLine.match(/★(\d[\.,]\d)\s*\((\d+)/);
             if(ratingMatch) {
@@ -250,8 +301,6 @@ export class GeminiService {
                  place.hours = line.replace(/radno vrijeme:/i, '').trim();
             } else if (line.toLowerCase().startsWith('procjena cijene:')) {
                 place.price = line.replace(/procjena cijene:/i, '').trim();
-            } else if (line.includes('[Google Maps link]')) {
-                 if (!place.mapLink) place.mapLink = '#';
             } else if (line) {
                 place.quote = (place.quote ? place.quote + ' ' : '') + line.replace(/^\*+|\*+$/g, '');
             }

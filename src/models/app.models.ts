@@ -32,7 +32,22 @@ export interface ErrorPart {
   message: string;
 }
 
-export type ChatPart = TextPart | UserImagePart | LocationsPart | ErrorPart;
+export interface Source {
+  uri: string;
+  title: string;
+}
+
+export interface SourcesPart {
+  type: 'sources';
+  sources: Source[];
+}
+
+export type ChatPart =
+  | TextPart
+  | UserImagePart
+  | LocationsPart
+  | ErrorPart
+  | SourcesPart;
 
 export interface ChatMessage {
   id: number;
