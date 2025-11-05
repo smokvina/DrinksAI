@@ -6,10 +6,12 @@ import { ChatMessage, ChatPart, Place, UserImagePart } from '../../models/app.mo
 
 @Component({
   selector: 'app-chat',
-  standalone: true,
   imports: [CommonModule, FormsModule],
   templateUrl: './chat.component.html',
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: {
+    'class': 'h-full flex flex-col'
+  }
 })
 export class ChatComponent {
   @ViewChild('chatContainer') private chatContainer!: ElementRef;
@@ -17,18 +19,21 @@ export class ChatComponent {
   private geminiService = inject(GeminiService);
   private nextId = 0;
   
-  userInput = signal('');
-  userImage = signal<UserImagePart | undefined>(undefined);
-  messages = signal<ChatMessage[]>([
+  private readonly initialMessages: ChatMessage[] = [
     {
       id: this.nextId++,
       role: 'model',
       parts: [{ type: 'text', content: 'Pozdrav! Upišite ime pića ili pošaljite sliku. Za preciznije rezultate, podijelite svoju lokaciju klikom na ikonu 📍.' }]
     }
-  ]);
+  ];
+
+  userInput = signal('');
+  userImage = signal<UserImagePart | undefined>(undefined);
+  messages = signal<ChatMessage[]>([...this.initialMessages]);
   isLoading = signal(false);
   userLocation = signal<{latitude: number, longitude: number} | null>(null);
   copiedPlaceName = signal<string | null>(null);
+  quickSuggestions = ['Pivo', 'Vino', 'Koktel', 'Kava'];
 
   isModelStreaming = computed(() => {
     if (!this.isLoading()) return false;
@@ -42,6 +47,20 @@ export class ChatComponent {
         this.scrollToBottom();
       }
     });
+  }
+
+  resetChat(): void {
+    this.messages.set([...this.initialMessages]);
+    this.userInput.set('');
+    this.userImage.set(undefined);
+    this.userLocation.set(null);
+    this.isLoading.set(false);
+  }
+
+  selectSuggestion(suggestion: string): void {
+    if (this.isLoading()) return;
+    this.userInput.set(suggestion);
+    this.sendMessage();
   }
 
   async sendMessage(): Promise<void> {
@@ -113,23 +132,28 @@ export class ChatComponent {
           }
           return msgs;
         });
-      } else {
-        this.messages.update(msgs => msgs.filter(m => m.id !== modelMessageId));
       }
+    } catch (error) {
+      console.error('API Error:', error);
+      const errorMessage = (error instanceof Error && error.message.includes('API key not valid'))
+        ? 'Vaš API ključ nije važeći. Provjerite postavke.'
+        : (error instanceof Error && error.message.includes('quota'))
+          ? 'Dosegnuli ste ograničenje za API. Molimo pokušajte kasnije.'
+          : 'Došlo je do neočekivane pogreške. Molimo pokušajte ponovno.';
 
-    } catch (e: any) {
       this.messages.update(msgs => {
-          const lastMsg = msgs.at(-1);
-          if (lastMsg?.id === modelMessageId) {
-             return [
-              ...msgs.slice(0, -1),
-              { ...lastMsg, parts: [{ type: 'error', message: e.message || 'Došlo je do pogreške.' }] }
-            ];
-          }
-          return msgs;
+        const lastMsg = msgs.at(-1);
+        if (lastMsg?.id === modelMessageId) {
+          return [
+            ...msgs.slice(0, -1),
+            { ...lastMsg, parts: [{ type: 'error', message: errorMessage }] }
+          ];
+        }
+        return [...msgs, { id: modelMessageId, role: 'model', parts: [{ type: 'error', message: errorMessage }] }];
       });
     } finally {
       this.isLoading.set(false);
+      this.scrollToBottom();
     }
   }
 
@@ -138,13 +162,13 @@ export class ChatComponent {
     if (input.files && input.files[0]) {
       const file = input.files[0];
       const reader = new FileReader();
-      reader.onload = (e: any) => {
-        this.userImage.set({ type: 'user-image', url: e.target.result });
-        // Automatically trigger send when an image is selected
-        this.sendMessage();
-      }
+      reader.onload = (e) => {
+        this.userImage.set({
+          type: 'user-image',
+          url: e.target?.result as string
+        });
+      };
       reader.readAsDataURL(file);
-      input.value = '';
     }
   }
 
@@ -153,88 +177,116 @@ export class ChatComponent {
   }
 
   requestLocation(): void {
-    if (navigator.geolocation) {
+    if (this.userLocation()) {
+      this.userLocation.set(null);
+      this.messages.update(m => [...m, {
+        id: this.nextId++,
+        role: 'model',
+        parts: [{ type: 'text', content: 'Vaša lokacija više neće biti korištena.' }]
+      }]);
+      return;
+    }
+
+    if ('geolocation' in navigator) {
       navigator.geolocation.getCurrentPosition(
         (position) => {
           this.userLocation.set({
             latitude: position.coords.latitude,
-            longitude: position.coords.longitude,
+            longitude: position.coords.longitude
           });
-          const locationMessage: ChatMessage = {
+          this.messages.update(m => [...m, {
             id: this.nextId++,
             role: 'model',
-            parts: [{ type: 'text', content: '✅ Lokacija spremljena! Pretraga će sada biti preciznija.' }]
-          };
-          this.messages.update(m => [...m, locationMessage]);
+            parts: [{ type: 'text', content: 'Lokacija je uspješno podijeljena i bit će korištena za sljedeću pretragu.' }]
+          }]);
         },
         (error) => {
-          let errorMessage = 'Došlo je do greške prilikom dohvaćanja lokacije.';
+          console.error('Geolocation error:', error);
+          let errorMessage = 'Nije moguće dohvatiti lokaciju. Provjerite dozvole u pregledniku.';
           switch(error.code) {
             case error.PERMISSION_DENIED:
-              errorMessage = "Odbili ste zahtjev za geolokaciju.";
+              errorMessage = 'Dozvola za lokaciju je odbijena. Molimo omogućite je u postavkama preglednika.';
               break;
             case error.POSITION_UNAVAILABLE:
-              errorMessage = "Informacije o lokaciji nisu dostupne.";
+              errorMessage = 'Informacije o lokaciji su nedostupne. Pokušajte ponovno.';
               break;
             case error.TIMEOUT:
-              errorMessage = "Isteklo je vrijeme zahtjeva za dohvaćanje lokacije.";
+              errorMessage = 'Isteklo je vrijeme za dohvaćanje lokacije. Pokušajte ponovno.';
               break;
           }
-           const errorChatMessage: ChatMessage = {
-            id: this.nextId++,
-            role: 'model',
-            parts: [{ type: 'error', message: errorMessage }]
-          };
-          this.messages.update(m => [...m, errorChatMessage]);
+          this.messages.update(m => [...m, { 
+              id: this.nextId++, 
+              role: 'model', 
+              parts: [{ type: 'error', message: errorMessage }] 
+          }]);
         }
       );
     } else {
-       const errorChatMessage: ChatMessage = {
-        id: this.nextId++,
-        role: 'model',
-        parts: [{ type: 'error', message: 'Geolokacija nije podržana u ovom pregledniku.' }]
-      };
-      this.messages.update(m => [...m, errorChatMessage]);
+        this.messages.update(m => [...m, { 
+            id: this.nextId++, 
+            role: 'model', 
+            parts: [{ type: 'error', message: 'Geolokacija nije podržana u vašem pregledniku.' }] 
+        }]);
     }
   }
 
   async sharePlace(place: Place): Promise<void> {
-    const shareData = {
-      title: `Preporuka za piće: ${place.name}`,
-      text: `Evo super mjesta za piće: ${place.name}, nalazi se na adresi ${place.address || 'Nepoznata adresa'}.`,
-      url: place.mapLink || window.location.href,
-    };
-
+    const shareText = `Evo preporuke za piće: ${place.name}\nAdresa: ${place.address || 'Nije dostupna'}\n${place.mapLink ? 'Karta: ' + place.mapLink : ''}`;
+    
     if (navigator.share) {
       try {
-        await navigator.share(shareData);
-      } catch (err) {
-        console.error('Error sharing:', err);
+        await navigator.share({
+          title: `Preporuka: ${place.name}`,
+          text: shareText,
+          url: place.mapLink || window.location.href
+        });
+      } catch (error) {
+        console.error('Greška pri dijeljenju:', error);
       }
     } else {
-      // Fallback to clipboard
-      const clipboardText = `${shareData.title}\n${shareData.text}\nLink: ${shareData.url}`;
       try {
-        await navigator.clipboard.writeText(clipboardText);
+        await navigator.clipboard.writeText(shareText);
         this.copiedPlaceName.set(place.name);
-        setTimeout(() => this.copiedPlaceName.set(null), 2000); // Reset after 2 seconds
+        setTimeout(() => this.copiedPlaceName.set(null), 2000);
       } catch (err) {
-        console.error('Failed to copy: ', err);
+        console.error('Nije uspjelo kopiranje:', err);
       }
     }
   }
 
-  private scrollToBottom(): void {
-    setTimeout(() => {
-      this.chatContainer?.nativeElement?.scrollTo({
-        top: this.chatContainer.nativeElement.scrollHeight,
-        behavior: 'smooth'
-      });
-    }, 100);
+  togglePlaceDetails(placeToToggle: Place): void {
+    this.messages.update(currentMessages => 
+      currentMessages.map(message => {
+        if (message.role === 'model') {
+          return {
+            ...message,
+            parts: message.parts.map(part => {
+              if (part.type === 'locations') {
+                return {
+                  ...part,
+                  places: part.places.map(p => 
+                    p === placeToToggle ? { ...p, expanded: !p.expanded } : p
+                  )
+                };
+              }
+              return part;
+            })
+          };
+        }
+        return message;
+      })
+    );
   }
 
-  isTextPart(part: ChatPart): part is ChatPart & { type: 'text' } { return part.type === 'text'; }
-  isUserImagePart(part: ChatPart): part is ChatPart & { type: 'user-image' } { return part.type === 'user-image'; }
-  isLocationsPart(part: ChatPart): part is ChatPart & { type: 'locations' } { return part.type === 'locations'; }
-  isErrorPart(part: ChatPart): part is ChatPart & { type: 'error' } { return part.type === 'error'; }
+  private scrollToBottom(): void {
+    try {
+      if (this.chatContainer?.nativeElement) {
+        setTimeout(() => {
+            this.chatContainer.nativeElement.scrollTop = this.chatContainer.nativeElement.scrollHeight;
+        }, 0);
+      }
+    } catch (err) {
+      console.error('Could not scroll to bottom:', err);
+    }
+  }
 }

@@ -1,12 +1,20 @@
-import { Component, ChangeDetectionStrategy } from '@angular/core';
+import { Component, ChangeDetectionStrategy, ViewChild } from '@angular/core';
 import { ChatComponent } from './components/chat/chat.component';
 
 @Component({
   selector: 'app-root',
-  // Fix: make component standalone
-  standalone: true,
   templateUrl: './app.component.html',
   imports: [ChatComponent],
+  // FIX: Corrected Change.OnPush to ChangeDetectionStrategy.OnPush
   changeDetection: ChangeDetectionStrategy.OnPush,
+  host: {
+    'class': 'h-full block'
+  }
 })
-export class AppComponent {}
+export class AppComponent {
+  @ViewChild(ChatComponent) chatComponent!: ChatComponent;
+
+  newChat(): void {
+    this.chatComponent.resetChat();
+  }
+}

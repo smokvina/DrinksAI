@@ -205,7 +205,7 @@ export class GeminiService {
     
     return placeBlocks.map(block => {
         const lines = block.trim().split('\n').map(l => l.trim());
-        const place: Place = { name: 'N/A' };
+        const place: Place = { name: 'N/A', expanded: false };
         
         if (lines.length > 0) {
             // Remove markdown list markers like "1." or "*" from the first line.

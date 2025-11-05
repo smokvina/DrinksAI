@@ -8,6 +8,7 @@ export interface Place {
   quote?: string;
   price?: string;
   mapLink?: string;
+  expanded?: boolean;
 }
 
 export interface TextPart {

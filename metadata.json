@@ -2,6 +2,7 @@
   "name": "Drink Finder AI",
   "description": "An intelligent assistant to help you find where to drink or buy your favorite beverages. Upload a photo or type the name of a drink to get recommendations for nearby bars, restaurants, and stores.",
   "requestFramePermissions": [
-    "camera"
+    "camera",
+    "geolocation"
   ]
 }
